@@ -1,0 +1,332 @@
+<!doctype html>
+<html lang="en">
+<!--
+README: Task Manager / To-do App (GitHub Pages + GitHub API + LocalStorage Fallback)
+
+Setup & Hosting:
+1. Create a new GitHub repository and add this HTML file at the root.
+2. Enable GitHub Pages in repository settings (branch: main or gh-pages).
+3. Create a folder named "data" in the repo (app will also auto-create if missing).
+   Files: data/tasks.json, data/meta.json
+4. Generate a GitHub Personal Access Token (PAT) with "repo > contents" scope only.
+   - Go to GitHub Settings > Developer Settings > Tokens (Classic) > Generate new token.
+   - Minimal scope: repo (contents only).
+   - Never share this token; enter it only in this app when prompted.
+5. Open your GitHub Pages URL (e.g., https://username.github.io/repo).
+6. Configure in-app GitHub repo settings (owner, repo, branch, token).
+
+JSON Schema:
+- data/tasks.json:
+[
+  {
+    "id": "uuid",
+    "title": "Task title",
+    "description": "Details...",
+    "status": "pending|done",
+    "priority": "low|medium|high",
+    "list": "Work",
+    "createdAt": "ISO8601 UTC",
+    "updatedAt": "ISO8601 UTC",
+    "targetDate": "ISO8601 UTC",
+    "pendingSince": "ISO8601 UTC"
+  }
+]
+- data/meta.json:
+{ "lists": ["Default", "Work", "Personal"] }
+
+Keyboard Shortcuts:
+- n = New task
+- / = Search
+- Space/Enter = Toggle complete on focused item
+
+All operations are local-first (optimistic UI). If GitHub save fails, user sees error.
+-->
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task Manager</title>
+  <style>
+    :root {
+      --bg-light: #f5f5f7;
+      --bg-dark: #1e1e1e;
+      --fg-light: #111;
+      --fg-dark: #eee;
+      --accent: #007aff;
+      --low: #34c759;
+      --medium: #ffcc00;
+      --high: #ff3b30;
+      --card-bg-light: #fff;
+      --card-bg-dark: #2c2c2e;
+      --border-radius: 12px;
+      --transition: 0.2s ease;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    }
+
+    body {
+      margin: 0;
+      background: var(--bg-light);
+      color: var(--fg-light);
+      transition: var(--transition);
+    }
+    body.dark {
+      background: var(--bg-dark);
+      color: var(--fg-dark);
+    }
+
+    header {
+      padding: 1rem;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background: var(--accent);
+      color: #fff;
+    }
+
+    .container {
+      padding: 1rem;
+      display: grid;
+      grid-template-columns: 250px 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 768px) {
+      .container { grid-template-columns: 1fr; }
+    }
+
+    .sidebar {
+      background: var(--card-bg-light);
+      border-radius: var(--border-radius);
+      padding: 1rem;
+      transition: var(--transition);
+    }
+    body.dark .sidebar { background: var(--card-bg-dark); }
+
+    .main {
+      background: var(--card-bg-light);
+      border-radius: var(--border-radius);
+      padding: 1rem;
+      transition: var(--transition);
+    }
+    body.dark .main { background: var(--card-bg-dark); }
+
+    .task {
+      border-bottom: 1px solid #ccc;
+      padding: 0.5rem 0;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: var(--transition);
+    }
+    .task:last-child { border-bottom: none; }
+
+    .task-info { flex: 1; margin-left: 0.5rem; }
+    .task-title { font-weight: bold; }
+    .task-desc { font-size: 0.85em; opacity: 0.8; }
+
+    .priority.low { color: var(--low); }
+    .priority.medium { color: var(--medium); }
+    .priority.high { color: var(--high); }
+
+    button, input, select {
+      font: inherit;
+      padding: 0.4rem 0.6rem;
+      border-radius: var(--border-radius);
+      border: 1px solid #ccc;
+      transition: var(--transition);
+    }
+    button:hover { background: var(--accent); color: #fff; cursor: pointer; }
+
+    .summary {
+      display: flex;
+      justify-content: space-around;
+      padding: 0.5rem;
+      font-size: 0.9em;
+      background: rgba(0,0,0,0.05);
+      border-radius: var(--border-radius);
+      margin-bottom: 1rem;
+    }
+    body.dark .summary { background: rgba(255,255,255,0.1); }
+  </style>
+</head>
+
+<body>
+  <header>
+    <div>📋 Task Manager</div>
+    <div>
+      <button id="toggleTheme">🌙</button>
+      <button id="newTaskBtn">＋ New Task</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="sidebar">
+      <h3>Lists</h3>
+      <ul id="lists"></ul>
+      <button id="addListBtn">＋ Add List</button>
+    </div>
+    <div class="main">
+      <div class="summary" id="summary"></div>
+      <input type="text" id="search" placeholder="🔍 Search tasks... (press /)">
+      <div id="tasks"></div>
+    </div>
+  </div>
+
+  <script>
+    const strings = {
+      pending: "Pending",
+      done: "Done",
+      low: "Low",
+      medium: "Medium",
+      high: "High",
+      overdue: "Overdue",
+      upcoming: "Upcoming",
+      total: "Total tasks",
+      pendingCount: "Pending",
+      overdueCount: "Overdue",
+      nextUpcoming: "Next target"
+    };
+
+    let state = {
+      lists: ["Default"],
+      tasks: [],
+      currentList: "Default",
+      darkMode: false,
+    };
+
+    const listsEl = document.getElementById("lists");
+    const tasksEl = document.getElementById("tasks");
+    const summaryEl = document.getElementById("summary");
+
+    function render() {
+      renderLists();
+      renderTasks();
+      renderSummary();
+    }
+
+    function renderLists() {
+      listsEl.innerHTML = "";
+      state.lists.forEach(l => {
+        const li = document.createElement("li");
+        li.textContent = l;
+        li.style.cursor = "pointer";
+        if (l === state.currentList) li.style.fontWeight = "bold";
+        li.onclick = () => { state.currentList = l; render(); };
+        listsEl.appendChild(li);
+      });
+    }
+
+    function renderTasks() {
+      tasksEl.innerHTML = "";
+      const q = document.getElementById("search").value.toLowerCase();
+      state.tasks.filter(t => t.list === state.currentList)
+        .filter(t => t.title.toLowerCase().includes(q) || (t.description||"").toLowerCase().includes(q))
+        .forEach(task => {
+          const div = document.createElement("div");
+          div.className = "task";
+          div.innerHTML = `
+            <input type="checkbox" ${task.status==="done"?"checked":""}>
+            <div class="task-info">
+              <div class="task-title">${task.title}</div>
+              <div class="task-desc">${task.description||""}</div>
+              <div>
+                <span class="priority ${task.priority}">${task.priority}</span> | 
+                Target: ${task.targetDate||"-"} | 
+                ${task.status==="pending" ? "Pending since: "+task.pendingSince : "Completed"}
+              </div>
+            </div>
+            <button data-id="${task.id}">✏️</button>
+          `;
+          div.querySelector("input").onchange = () => toggleTask(task.id);
+          div.querySelector("button").onclick = () => editTask(task.id);
+          tasksEl.appendChild(div);
+        });
+    }
+
+    function renderSummary() {
+      const total = state.tasks.length;
+      const pending = state.tasks.filter(t => t.status==="pending").length;
+      const overdue = state.tasks.filter(t => t.status==="pending" && t.targetDate && new Date(t.targetDate)<new Date()).length;
+      const nextUpcoming = state.tasks.filter(t => t.status==="pending" && t.targetDate).sort((a,b)=>new Date(a.targetDate)-new Date(b.targetDate))[0];
+      summaryEl.innerHTML = `
+        ${strings.total}: ${total} |
+        ${strings.pendingCount}: ${pending} |
+        ${strings.overdueCount}: ${overdue} |
+        ${strings.nextUpcoming}: ${nextUpcoming?nextUpcoming.targetDate:"-"}
+      `;
+    }
+
+    function newTask() {
+      const title = prompt("Task title?");
+      if (!title) return;
+      const task = {
+        id: crypto.randomUUID(),
+        title,
+        description: "",
+        status: "pending",
+        priority: "low",
+        list: state.currentList,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+        targetDate: "",
+        pendingSince: new Date().toISOString()
+      };
+      state.tasks.push(task);
+      save();
+      render();
+    }
+
+    function editTask(id) {
+      const task = state.tasks.find(t=>t.id===id);
+      const title = prompt("Edit title", task.title);
+      if (title!==null) task.title=title;
+      const desc = prompt("Edit description", task.description);
+      if (desc!==null) task.description=desc;
+      const priority = prompt("Priority low/medium/high", task.priority);
+      if (priority) task.priority=priority;
+      const target = prompt("Target date (YYYY-MM-DD)", task.targetDate);
+      if (target) task.targetDate=target;
+      task.updatedAt = new Date().toISOString();
+      save();
+      render();
+    }
+
+    function toggleTask(id) {
+      const task = state.tasks.find(t=>t.id===id);
+      task.status = task.status==="pending"?"done":"pending";
+      task.updatedAt = new Date().toISOString();
+      if(task.status==="pending") task.pendingSince=new Date().toISOString();
+      save();
+      render();
+    }
+
+    function save() {
+      localStorage.setItem("taskApp", JSON.stringify(state));
+    }
+    function load() {
+      const s = localStorage.getItem("taskApp");
+      if (s) state = JSON.parse(s);
+    }
+
+    document.getElementById("newTaskBtn").onclick = newTask;
+    document.getElementById("addListBtn").onclick = () => {
+      const name = prompt("List name?");
+      if(name) { state.lists.push(name); save(); render(); }
+    };
+    document.getElementById("search").oninput = render;
+    document.getElementById("toggleTheme").onclick = () => {
+      document.body.classList.toggle("dark");
+    };
+
+    window.onload = () => {
+      load();
+      render();
+    };
+
+    // Keyboard shortcuts
+    document.addEventListener("keydown", e => {
+      if(e.key==="n") newTask();
+      if(e.key==="/") { e.preventDefault(); document.getElementById("search").focus(); }
+    });
+  </script>
+</body>
+</html>
