@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Task Manager (GitHub Sync)</title>
+  <style>
+    /* --- styling same as before --- */
+    body { margin:0; font-family:sans-serif; }
+    header { background:#007aff; color:#fff; padding:1rem; display:flex; justify-content:space-between; }
+    .container { display:grid; grid-template-columns:250px 1fr; gap:1rem; padding:1rem; }
+    .sidebar, .main { background:#fff; padding:1rem; border-radius:12px; }
+    .task { border-bottom:1px solid #ccc; padding:0.5rem; display:flex; justify-content:space-between; }
+    button { padding:0.4rem 0.6rem; border-radius:8px; cursor:pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <div>📋 Task Manager</div>
+    <div>
+      <button id="toggleTheme">🌙</button>
+      <button id="newTaskBtn">＋ New Task</button>
+    </div>
+  </header>
+
+  <div class="container">
+    <div class="sidebar">
+      <h3>Lists</h3>
+      <ul id="lists"></ul>
+      <button id="addListBtn">＋ Add List</button>
+      <h3>GitHub Config</h3>
+      <input id="ghOwner" placeholder="owner"><br>
+      <input id="ghRepo" placeholder="repo"><br>
+      <input id="ghBranch" placeholder="branch" value="main"><br>
+      <input id="ghToken" placeholder="token" type="password"><br>
+      <button onclick="syncNow()">🔄 Sync Now</button>
+    </div>
+    <div class="main">
+      <div id="summary"></div>
+      <input type="text" id="search" placeholder="🔍 Search...">
+      <div id="tasks"></div>
+    </div>
+  </div>
+
+  <script>
+    let state = { lists:["Default"], tasks:[], currentList:"Default" };
+    const tasksEl = document.getElementById("tasks"), listsEl=document.getElementById("lists"), summaryEl=document.getElementById("summary");
+
+    // ---------- GitHub API helpers ----------
+    async function getFile(path) {
+      const {owner,repo,branch,token} = getConfig();
+      const url=`https://api.github.com/repos/${owner}/${repo}/contents/${path}?ref=${branch}`;
+      const res=await fetch(url,{ headers:{Authorization:`token ${token}`}});
+      if(!res.ok) throw new Error("Load error");
+      const json=await res.json();
+      return { content:JSON.parse(atob(json.content)), sha:json.sha };
+    }
+    async function putFile(path,content,sha) {
+      const {owner,repo,branch,token}=getConfig();
+      const url=`https://api.github.com/repos/${owner}/${repo}/contents/${path}`;
+      const res=await fetch(url,{
+        method:"PUT",
+        headers:{Authorization:`token ${token}`,"Content-Type":"application/json"},
+        body:JSON.stringify({
+          message:"Update "+path,
+          content:btoa(unescape(encodeURIComponent(JSON.stringify(content,null,2)))),
+          sha, branch
+        })
+      });
+      if(!res.ok) throw new Error("Save error");
+      return await res.json();
+    }
+    function getConfig(){
+      return {
+        owner:document.getElementById("ghOwner").value,
+        repo:document.getElementById("ghRepo").value,
+        branch:document.getElementById("ghBranch").value,
+        token:document.getElementById("ghToken").value
+      };
+    }
+
+    // ---------- App logic ----------
+    function render(){
+      listsEl.innerHTML=""; 
+      state.lists.forEach(l=>{
+        const li=document.createElement("li");
+        li.textContent=l; li.style.cursor="pointer";
+        if(l===state.currentList) li.style.fontWeight="bold";
+        li.onclick=()=>{state.currentList=l;render();};
+        listsEl.appendChild(li);
+      });
+      tasksEl.innerHTML="";
+      state.tasks.filter(t=>t.list===state.currentList).forEach(t=>{
+        const d=document.createElement("div"); d.className="task";
+        d.innerHTML=`<input type=checkbox ${t.status==="done"?"checked":""}>
+          <div>${t.title}</div><button data-id="${t.id}">✏️</button>`;
+        d.querySelector("input").onchange=()=>toggleTask(t.id);
+        d.querySelector("button").onclick=()=>editTask(t.id);
+        tasksEl.appendChild(d);
+      });
+      summaryEl.textContent=`Total: ${state.tasks.length}`;
+    }
+
+    function newTask(){
+      const title=prompt("Task title?"); if(!title) return;
+      state.tasks.push({id:crypto.randomUUID(),title,status:"pending",list:state.currentList,createdAt:new Date().toISOString()});
+      save(); render();
+    }
+    function editTask(id){
+      const t=state.tasks.find(x=>x.id===id);
+      const nt=prompt("Edit title",t.title); if(nt!==null) t.title=nt;
+      save(); render();
+    }
+    function toggleTask(id){
+      const t=state.tasks.find(x=>x.id===id);
+      t.status=t.status==="done"?"pending":"done"; save(); render();
+    }
+
+    async function save(){
+      try{
+        const {content,sha}=await getFile("data/tasks.json");
+        await putFile("data/tasks.json",state.tasks,sha);
+        await putFile("data/meta.json",{lists:state.lists});
+        alert("✅ Saved to GitHub");
+      }catch(e){
+        localStorage.setItem("taskApp",JSON.stringify(state));
+        console.warn("Saved locally, GitHub failed",e);
+      }
+    }
+    async function load(){
+      try{
+        const t=await getFile("data/tasks.json"); state.tasks=t.content;
+        const m=await getFile("data/meta.json"); state.lists=m.content.lists;
+      }catch{ 
+        const s=localStorage.getItem("taskApp"); if(s) state=JSON.parse(s);
+      }
+    }
+    async function syncNow(){ await save(); render(); }
+
+    // ---------- Event bindings ----------
+    document.getElementById("newTaskBtn").onclick=newTask;
+    document.getElementById("addListBtn").onclick=()=>{ const n=prompt("List name?"); if(n) {state.lists.push(n);save();render();}};
+    window.onload=async()=>{ await load(); render(); };
+  </script>
+</body>
+</html>
